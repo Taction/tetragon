@@ -18,10 +18,10 @@ COPY --from=hubble-libbpf /go/src/github.com/covalentio/hubble-fgs/src/libbpf.so
 COPY --from=hubble-libbpf /go/src/github.com/covalentio/hubble-fgs/src/libbpf.a /usr/local/lib/
 RUN ldconfig /usr/local/
 COPY . ./
-RUN make tetragon-image LOCAL_CLANG=1
+RUN make tetragon-image-debug LOCAL_CLANG=1 NOOPT=1
 
 FROM docker.io/library/golang:1.17.8-alpine3.15@sha256:b35984144ec2c2dfd6200e112a9b8ecec4a8fd9eff0babaff330f1f82f14cb2a as gops
-ENV GOPROXY=https://goproxy.cn,direct
+ENV GOPROXY https://goproxy.cn,direct
 RUN apk add --no-cache binutils git \
  && git clone https://github.com/google/gops /go/src/github.com/google/gops \
  && cd /go/src/github.com/google/gops \
@@ -32,7 +32,7 @@ RUN apk add --no-cache binutils git \
 # Mostly copied from https://github.com/cilium/image-tools/blob/master/images/bpftool
 FROM quay.io/cilium/image-compilers:c1ba0665b6f9f012d014a642d9882f7c38bdf365@sha256:01c7c957e9b0fc200644996c6bedac297c98b81dea502a3bc3047837e67a7fcb as bpftool-builder
 ENV REV "5e22dd18626726028a93ff1350a8a71a00fd843d"
-#RUN curl --fail --show-error --silent --location "https://kernel.googlesource.com/pub/scm/linux/kernel/git/bpf/bpf-next/+archive/${REV}.tar.gz" --output /tmp/linux.tgz
+# RUN curl --fail --show-error --silent --location "https://kernel.googlesource.com/pub/scm/linux/kernel/git/bpf/bpf-next/+archive/${REV}.tar.gz" --output /tmp/linux.tgz
 COPY bpf-next-5e22dd18626726028a93ff1350a8a71a00fd843d.tar.gz /tmp/linux.tgz
 RUN mkdir -p /src/linux
 RUN tar -xf /tmp/linux.tgz -C /src/linux
@@ -41,7 +41,12 @@ WORKDIR /src/linux/tools/bpf/bpftool
 RUN make -j $(nproc) LDFLAGS=-static
 RUN strip bpftool
 
+FROM golang:latest AS golang
+ENV GOPROXY=https://goproxy.cn,direct
+RUN CGO_ENABLED=0 go get -ldflags '-s -w -extldflags -static' github.com/go-delve/delve/cmd/dlv
+
 FROM docker.io/library/alpine:3.15.4@sha256:a777c9c66ba177ccfea23f2a216ff6721e78a662cd17019488c417135299cd89
+# FROM ubuntu:latest
 RUN apk add iproute2
 RUN addgroup hubble	     && \
     mkdir /var/lib/tetragon/ && \
@@ -55,3 +60,6 @@ COPY --from=hubble-libbpf /go/src/github.com/covalentio/hubble-fgs/src/libbpf.so
 COPY --from=hubble-libbpf /go/src/github.com/covalentio/hubble-fgs/src/libbpf.so.0 /usr/local/lib/
 COPY --from=hubble-libbpf /go/src/github.com/covalentio/hubble-fgs/src/libbpf.so /usr/local/lib/
 COPY --from=hubble-libbpf /go/src/github.com/covalentio/hubble-fgs/src/libbpf.a /usr/local/lib/
+COPY --from=golang /go/bin/dlv /
+
+CMD ["/dlv", "--listen=:2345", "--headless=true", "--api-version=2", "--accept-multiclient", "exec", "/usr/bin/tetragon", "--", "--config-dir", "/etc/tetragon"]

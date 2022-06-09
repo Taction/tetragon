@@ -72,6 +72,10 @@ tetragon-image:
 	GOOS=linux GOARCH=amd64 $(GO) build -tags netgo -mod=vendor -ldflags=$(GO_IMAGE_LDFLAGS) ./cmd/tetragon/
 	GOOS=linux GOARCH=amd64 $(GO) build -tags netgo -mod=vendor -ldflags=$(GO_IMAGE_LDFLAGS) ./cmd/tetra/
 
+tetragon-image-debug:
+	GOOS=linux GOARCH=amd64 $(GO) build -tags netgo -gcflags=$(GO_GCFLAGS) -ldflags=$(GO_IMAGE_LDFLAGS) -mod=vendor ./cmd/tetragon/
+	GOOS=linux GOARCH=amd64 $(GO) build -tags netgo -gcflags=$(GO_GCFLAGS) -ldflags=$(GO_IMAGE_LDFLAGS) -mod=vendor ./cmd/tetra/
+
 tetragon-operator-image:
 	CGO_ENABLED=0 $(GO) build -ldflags=$(GO_OPERATOR_IMAGE_LDFLAGS) -mod=vendor -o tetragon-operator ./operator
 
@@ -126,6 +130,15 @@ image-operator:
 	$(CONTAINER_ENGINE) build -f operator.Dockerfile -t "cilium/tetragon-operator:${DOCKER_IMAGE_TAG}" .
 	$(QUIET)echo "Push like this when ready:"
 	$(QUIET)echo "${CONTAINER_ENGINE} push cilium/tetragon-operator:$(DOCKER_IMAGE_TAG)"
+
+image-debug-all:
+	$(CONTAINER_ENGINE) build -f Dockerfile.debug -t "docker4zc/tetragon:${DOCKER_IMAGE_TAG}" .
+	$(QUIET)echo "Push like this when ready:"
+	$(QUIET)echo "${CONTAINER_ENGINE} push docker4zc/tetragon:$(DOCKER_IMAGE_TAG)"
+	$(CONTAINER_ENGINE) push docker4zc/tetragon:${DOCKER_IMAGE_TAG}
+#	$(CONTAINER_ENGINE) build -f operator.debug.Dockerfile -t "docker4zc/tetragon-operator:${DOCKER_IMAGE_TAG}" .
+#	$(QUIET)echo "Push like this when ready:"
+#	$(QUIET)echo "${CONTAINER_ENGINE} push docker4zc/tetragon-operator:$(DOCKER_IMAGE_TAG)"
 
 image-test:
 	$(CONTAINER_ENGINE) build -f Dockerfile.test -t "cilium/tetragon-test:${DOCKER_IMAGE_TAG}" .
