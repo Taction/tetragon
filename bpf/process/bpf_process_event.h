@@ -4,6 +4,16 @@
 #ifndef _BPF_PROCESS_EVENT__
 #define _BPF_PROCESS_EVENT__
 
+#define ENAMETOOLONG  36 /* File name too long */
+#define PATH_MAP_SIZE 4096
+
+struct bpf_map_def __attribute__((section("maps"), used)) buffer_heap_map = {
+	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
+	.key_size = sizeof(int),
+	.value_size = PATH_MAP_SIZE * sizeof(char),
+	.max_entries = 1,
+};
+
 static inline __attribute__((always_inline)) __u64
 __get_auid(struct task_struct *task)
 {
@@ -46,79 +56,6 @@ get_parent_auid(struct task_struct *t)
 	return __get_auid(task);
 }
 
-#define CWD_DENTRY_REG	      "r9"
-#define CWD_VFSMNT_DENTRY_REG "r6"
-#define CWD_OFFSET_REG	      "r7"
-
-#define PROBE_CWD_READ_LOOP_HEADER                                             \
-	CWD_DENTRY_REG " = *(u64 *)%[dentry];\n" CWD_VFSMNT_DENTRY_REG         \
-		       " = *(u64 *)%[vfsmnt];\n" CWD_OFFSET_REG                \
-		       " = *(u32 *)%[offset];\n"
-
-#define PROBE_CWD_READ                                                                           \
-	/* if (!dentry) { break; } */                                                            \
-	"r3 = " CWD_DENTRY_REG ";\n"                                                             \
-	"if r3 == 0 goto %l[a];\n" /* probe_read(&parent, sizeof(parent), &dentry->d_parent); */ \
-	"r2 = *(u32 *)%[dentry_parent];\n"                                                       \
-	"r3 += r2;\n"                                                                            \
-	"r2 = 8;\n"                                                                              \
-	"r1 = %[ptr];\n"                                                                         \
-	"call 4;\n" /* if (!parent) { break; } */                                                \
-	"r4 = *(u64 *)(%[ptr] + 0);\n"                                                           \
-	"if r4 == 0x0 goto %l[a];\n" /* if (vfsmnt_dentry && dentry == vfsmnt_dentry) { */       \
-	"if " CWD_VFSMNT_DENTRY_REG " == " CWD_DENTRY_REG                                        \
-	" goto %l[a];\n" /* if (dentry == dentry->d_parent) { */                                 \
-	"if r4 == " CWD_DENTRY_REG                                                               \
-	" goto %l[a];\n" /* name = &dentry->d_name; */                                           \
-	/* dentry = parent; */ /* probe_read(&dname, sizeof(dname), &name->name); */             \
-	"r3 = " CWD_DENTRY_REG ";\n"                                                             \
-	"r2 = *(u32 *)%[dentry_name];\n"                                                         \
-	"r3 += r2;\n" CWD_DENTRY_REG " = r4;\n" /* r9 = parent */                                \
-	"r1 = %[ptr];\n"                                                                         \
-	"r2 = 8;\n"                                                                              \
-	"call 4;\n" /* pcwd = curr + offset */ /* probe_read(pcwd, 1, &slash); */                \
-	"r1 = *(u64 *)%[pid];\n" CWD_OFFSET_REG " &= 0x3FF;\n"                                   \
-	"r1 += " CWD_OFFSET_REG ";\n"                                                            \
-	"r2 = 1;\n"                                                                              \
-	"r3 = *(u64 *)%[slash];\n"                                                               \
-	"call 4;\n" /* pcwd++; */ /* ret = probe_read_str(pcwd, CWD_MAX, dname); */              \
-		CWD_OFFSET_REG " += 1;\n"                                                        \
-	"r1 = *(u64 *)%[pid];\n" CWD_OFFSET_REG " &= 0x3FF;\n"                                   \
-	"r1 += " CWD_OFFSET_REG ";\n"                                                            \
-	"r2 = " XSTR(                                                                            \
-		CWD_MAX) ";\n"                                                                   \
-			 "r3 = *(u64 *)(%[ptr] + 0);\n"                                          \
-			 "call 45;\n" /* if (ret < 0) { */ /* cwdsize += ret */                  \
-			 "if r0 s< 1 goto %l[a];\n"                                              \
-			 "r0 -= 1\n;" CWD_OFFSET_REG " += r0;\n"                                 \
-			 "*(u32 *)%[offset] = " CWD_OFFSET_REG                                   \
-			 ";\n" /* count iterations */                                            \
-			 "r3 = *(u32 *)%[iter];\n"                                               \
-			 "r3 += 1;\n"                                                            \
-			 "*(u32 *)%[iter] = r3;\n"
-
-/* we cannot avoid probe_read calls here as
- * something line "*(u8 *)(r1 + 0) = r3;\n"
- * fails.
- */
-#define MARK_PATH_WITH_SYMBOLS                                                 \
-	"r1 = *(u64 *)%[pid];\n" CWD_OFFSET_REG " &= 0x3FF;\n"                 \
-	"r1 += " CWD_OFFSET_REG ";\n"                                          \
-	"r2 = 1;\n"                                                            \
-	"r3 = *(u64 *)%[slash];\n"                                             \
-	"call 4;\n" CWD_OFFSET_REG " += 1;\n"                                  \
-	"r1 = *(u64 *)%[pid];\n" CWD_OFFSET_REG " &= 0x3FF;\n"                 \
-	"r1 += " CWD_OFFSET_REG ";\n"                                          \
-	"r2 = 1;\n"                                                            \
-	"r3 = *(u64 *)%[symbol];\n"                                            \
-	"call 4;\n" CWD_OFFSET_REG " += 1;\n"
-
-#define MARK_UNRESOLVED_PATH_IF_NEEDED                                             \
-	"if r3 < " XSTR(                                                           \
-		PROBE_CWD_READ_ITERATIONS) " goto %l[a];\n" MARK_PATH_WITH_SYMBOLS \
-					   "*(u32 *)%[offset] = " CWD_OFFSET_REG   \
-					   ";\n"
-
 #define offsetof_btf(s, memb) ((size_t)((char *)_(&((s *)0)->memb) - (char *)0))
 
 #define container_of_btf(ptr, type, member)                                    \
@@ -127,154 +64,186 @@ get_parent_auid(struct task_struct *t)
 		((type *)(__mptr - offsetof_btf(type, member)));               \
 	})
 
-static inline __attribute__((always_inline)) u32
-getpath(void *curr, struct dentry *dentry, struct vfsmount *vfsmnt,
-	volatile u32 offset, u32 *flags)
-{
-	long dentry_parent, dentry_name;
-	char slash = '/', *pslash = &slash;
-	char symbol = '&', *psymbol = &symbol;
-	long *ptr = 0;
-	struct dentry *vfsmnt_dentry = 0;
-	u32 iter = 0;
-
-	/* Verify complains if this is not a constant (compiler optimizes
-	 * us into a corner ottherwise). So for now note qstr->name is 8
-	 * bytes into struct on all kernels we use.
-	 */
-	const int qstr = 8;
-
-	if (vfsmnt)
-		probe_read(&vfsmnt_dentry, sizeof(vfsmnt_dentry),
-			   _(&vfsmnt->mnt_root));
-
-	dentry_parent = offsetof_btf(struct dentry, d_parent);
-	dentry_name = offsetof_btf(struct dentry, d_name);
-	dentry_name += qstr;
-
-	/* For 'asm goto' offset needs to be a memory address otherwise
-	 * code may load the value from memory into a register in the preheader,
-	 * but then goto logic will not know to load final result back into
-	 * memory on goto exit. The result is some code like this,
-	 *
-	 * call 45
-	 * if r0 s< 1 goto +42 <LBB0_77>
-	 * r0 -= 1
-	 * r7 += r0
-	 * *(u64 *)(r10 - 168) = r7
-	 *
-	 * Notice we skip the load at the end needed to push offset back into
-	 * stack. Later we might have code like this,
-	 *
-	 * r3 = *(u64 *)(r10 - 168)
-	 *
-	 * That expect to load the new offset, but its not there. To make
-	 * things extra convoluted we are short on registers so can't mark
-	 * offset as clobbered. In order to defeat compiler though we mark
-	 * offset volatile above and this forces the retrun __offset to reload
-	 * the value from stack.
-	 */
-	asm volatile goto(
-		PROBE_CWD_READ_LOOP_HEADER M_REPEAT(PROBE_CWD_READ_ITERATIONS,
-						    PROBE_CWD_READ)
-			MARK_UNRESOLVED_PATH_IF_NEEDED
-		:
-		: [pid] "m"(curr), [vfsmnt] "m"(vfsmnt_dentry),
-		  [dentry] "m"(dentry), [ptr] "+r"(&ptr), [slash] "m"(pslash),
-		  [symbol] "m"(psymbol), [dentry_parent] "m"(dentry_parent),
-		  [dentry_name] "m"(dentry_name), [offset] "+m"(offset),
-		  [iter] "+m"(iter)
-		: "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r9", "memory"
-		: a);
-a:
-	if (iter >= PROBE_CWD_READ_ITERATIONS)
-		*flags |= UNRESOLVED_PATH_COMPONENTS;
-	return offset;
-}
-
-static inline __attribute__((always_inline)) u32
-mark_unresolved(void *curr, struct mount *mnt)
-{
-	struct mount *local_mnt;
-	struct dentry *dentry, *dentry_parent;
-
-	probe_read(&local_mnt, sizeof(struct mount *), _(&(mnt->mnt_parent)));
-	probe_read(&dentry, sizeof(struct dentry *),
-		   _(&(local_mnt->mnt_mountpoint)));
-	probe_read(&dentry_parent, sizeof(struct dentry *),
-		   _(&(dentry->d_parent)));
-
-	if (dentry == dentry_parent) // IS_ROOT(dentry)
-		return 0;
-	return 1;
-}
-
 static inline __attribute__((always_inline)) struct mount *
 real_mount(struct vfsmount *mnt)
 {
 	return container_of_btf(mnt, struct mount, mnt);
 }
 
-static inline __attribute__((always_inline)) struct mount *
-follow_mount_point(struct mount *mnt, void *argp, u32 *size, u32 *flags)
+static inline __attribute__((always_inline)) bool IS_ROOT(struct dentry *dentry)
 {
-	struct dentry *dentry, *dentry_parent;
-	struct mount *local_mnt;
+	struct dentry *d_parent;
 
-	if (!mnt)
-		return 0;
-
-	probe_read(&local_mnt, sizeof(struct mount *), _(&(mnt->mnt_parent)));
-	probe_read(&dentry, sizeof(struct dentry *),
-		   _(&(local_mnt->mnt_mountpoint)));
-	*size = getpath(argp, dentry, 0, *size, flags);
-
-	probe_read(&dentry_parent, sizeof(struct dentry *),
-		   _(&(dentry->d_parent)));
-	if (dentry == dentry_parent) /* IS_ROOT(dentry) */
-		return 0;
-
-	return local_mnt;
+	probe_read(&d_parent, sizeof(d_parent), _(&dentry->d_parent));
+	return (dentry == d_parent);
 }
 
-static inline __attribute__((always_inline)) u32
-get_full_path(struct path *path, void *argp, u32 offset, u32 *flags)
+static inline __attribute__((always_inline)) bool
+hlist_bl_unhashed(const struct hlist_bl_node *h)
 {
-	struct path pwd;
+	struct hlist_bl_node **pprev;
+
+	probe_read(&pprev, sizeof(pprev), _(&h->pprev));
+	return !pprev;
+}
+
+static inline __attribute__((always_inline)) int
+d_unhashed(struct dentry *dentry)
+{
+	return hlist_bl_unhashed(_(&dentry->d_hash));
+}
+
+static inline __attribute__((always_inline)) int
+d_unlinked(struct dentry *dentry)
+{
+	return d_unhashed(dentry) && !IS_ROOT(dentry);
+}
+
+static inline __attribute__((always_inline)) int
+prepend_name(char *bf, char **buffer, int *buflen, const char *name, u32 dlen)
+{
+	char slash = '/';
+	u64 buffer_offset;
+
+	if (buffer == 0)
+		return -ENAMETOOLONG;
+
+	buffer_offset = (u64)(*buffer) - (u64)bf;
+
+	*buflen -= (dlen + 1);
+	if (*buflen < 0)
+		return -ENAMETOOLONG;
+
+	buffer_offset -= (dlen + 1);
+
+	if (dlen > 255)
+		return -ENAMETOOLONG;
+	if (buffer_offset > PATH_MAP_SIZE - 256)
+		return -ENAMETOOLONG;
+
+	probe_read(bf + buffer_offset, sizeof(char), &slash);
+	asm volatile("%[dlen] &= 0xff;\n" ::[dlen] "+r"(dlen) :);
+	probe_read(bf + buffer_offset + 1, dlen * sizeof(char), name);
+
+	*buffer = bf + buffer_offset;
+	return 0;
+}
+
+static inline __attribute__((always_inline)) int
+prepend(char **buffer, int *buflen, const char *str, int namelen)
+{
+	*buflen -= namelen;
+	if (*buflen < 0)
+		return -ENAMETOOLONG;
+	*buffer -= namelen;
+	memcpy(*buffer, str, namelen);
+	return 0;
+}
+
+static inline __attribute__((always_inline)) int
+prepend_path(const struct path *path, const struct path *root, char *bf,
+	     char **buffer, int *buflen)
+{
+	struct dentry *dentry;
+	struct vfsmount *vfsmnt;
 	struct mount *mnt;
-	struct dentry *dentry, *dentry_parent;
-	u32 mnt_unresolved = 0;
-#ifdef __LARGE_BPF_PROG
-	int i = 0;
+	struct qstr d_name;
+	int error = 0;
+	char *bptr;
+	int i, blen;
+	bool resolved = false;
+
+	bptr = *buffer;
+	blen = *buflen;
+	probe_read(&dentry, sizeof(dentry), _(&path->dentry));
+	probe_read(&vfsmnt, sizeof(vfsmnt), _(&path->mnt));
+	mnt = real_mount(vfsmnt);
+
+#ifndef __LARGE_BPF_PROG
+#pragma unroll
 #endif
+	for (i = 0; i < PROBE_CWD_READ_ITERATIONS; ++i) {
+		struct dentry *parent;
+		struct dentry *vfsmnt_mnt_root;
+		struct vfsmount *root_mnt;
+		struct dentry *root_dentry;
 
-	probe_read(&pwd, sizeof(pwd), path);
-	offset = getpath(argp, pwd.dentry, pwd.mnt, offset, flags);
+		probe_read(&root_dentry, sizeof(root_dentry), _(&root->dentry));
+		probe_read(&root_mnt, sizeof(root_mnt), _(&root->mnt));
+		if (!(dentry != root_dentry || vfsmnt != root_mnt)) {
+			resolved = true;
+			break;
+		}
 
-	/* get first mount point through mnt->mnt_mountpoint */
-	mnt = real_mount(pwd.mnt);
-	probe_read(&dentry, sizeof(struct dentry *), _(&(mnt->mnt_mountpoint)));
-	offset = getpath(argp, dentry, 0, offset, flags);
+		probe_read(&vfsmnt_mnt_root, sizeof(vfsmnt_mnt_root),
+			   _(&vfsmnt->mnt_root));
+		if (dentry == vfsmnt_mnt_root || IS_ROOT(dentry)) {
+			struct mount *parent;
 
-	probe_read(&dentry_parent, sizeof(struct dentry *),
-		   _(&(dentry->d_parent)));
-	if (dentry != dentry_parent) { // !IS_ROOT(dentry)
-#ifdef __LARGE_BPF_PROG
-		for (i = 0; i < MAX_MOUNT_POINTS; ++i)
-			if ((mnt = follow_mount_point(mnt, argp, &offset,
-						      flags)) == 0)
-				break;
-#else
-		// one more call to support at max 2 mount points
-		mnt = follow_mount_point(mnt, argp, &offset, flags);
-#endif
-		mnt_unresolved = mark_unresolved(argp, mnt);
+			probe_read(&parent, sizeof(parent),
+				   _(&mnt->mnt_parent));
+
+			/* Global root? */
+			if (mnt != parent) {
+				probe_read(&dentry, sizeof(dentry),
+					   _(&mnt->mnt_mountpoint));
+				mnt = parent;
+				probe_read(&vfsmnt, sizeof(vfsmnt),
+					   _(&mnt->mnt));
+				continue;
+			}
+
+			resolved = true;
+			break;
+		}
+		probe_read(&parent, sizeof(parent), _(&dentry->d_parent));
+		probe_read(&d_name, sizeof(d_name), _(&dentry->d_name));
+		error = prepend_name(bf, &bptr, &blen,
+				     (const char *)d_name.name, d_name.len);
+		if (error)
+			break;
+
+		dentry = parent;
 	}
+	if (bptr == *buffer) {
+		*buflen = 0;
+		return 0;
+	}
+	if (!resolved)
+		error = UNRESOLVED_PATH_COMPONENTS;
+	*buffer = bptr;
+	*buflen = blen;
+	return error;
+}
 
-	if (mnt_unresolved)
-		*flags |= UNRESOLVED_MOUNT_POINTS;
+static inline __attribute__((always_inline)) int
+path_with_deleted(const struct path *path, const struct path *root, char *bf,
+		  char **buf, int *buflen)
+{
+	struct dentry *dentry;
 
-	return offset;
+	probe_read(&dentry, sizeof(dentry), _(&path->dentry));
+	if (d_unlinked(dentry)) {
+		int error = prepend(buf, buflen, " (deleted)", 10);
+
+		if (error)
+			return error;
+	}
+	return prepend_path(path, root, bf, buf, buflen);
+}
+
+/* the 'buf' argument should be always the value of 'buffer_heap_map' map */
+static inline __attribute__((always_inline)) char *
+__d_path_local(const struct path *path, char *buf, int *buflen, int *error)
+{
+	char *res = buf + *buflen;
+	struct task_struct *task;
+	struct fs_struct *fs;
+
+	task = (struct task_struct *)get_current_task();
+	probe_read(&fs, sizeof(fs), _(&task->fs));
+	*error = path_with_deleted(path, _(&fs->root), buf, &res, buflen);
+	return res;
 }
 
 static inline __attribute__((always_inline)) int64_t
@@ -283,7 +252,9 @@ getcwd(struct msg_process *curr, __u32 offset, __u32 proc_pid, bool prealloc)
 	struct task_struct *task = get_task_from_pid(proc_pid);
 	__u32 orig_size = curr->size, orig_offset = offset;
 	struct fs_struct *fs;
-	u32 flags = 0;
+	int flags = 0;
+	char *buffer;
+	int zero = 0, size = 0;
 
 	probe_read(&fs, sizeof(fs), _(&task->fs));
 	if (!fs) {
@@ -291,14 +262,27 @@ getcwd(struct msg_process *curr, __u32 offset, __u32 proc_pid, bool prealloc)
 		return 0;
 	}
 
-	offset = get_full_path(_(&fs->pwd), curr, offset, &flags);
+	buffer = map_lookup_elem(&buffer_heap_map, &zero);
+	if (!buffer)
+		return 0;
+
+	size = 256;
+	buffer = __d_path_local(_(&fs->pwd), buffer, &size, &flags);
+	if (!buffer)
+		return 0;
+	if (size > 0)
+		size = 256 - size;
+
+	asm volatile("%[offset] &= 0x3ff;\n" ::[offset] "+r"(offset) :);
+	asm volatile("%[size] &= 0xff;\n" ::[size] "+r"(size) :);
+	probe_read((char *)curr + offset, size, buffer);
+
+	offset += size;
 	curr->size = offset;
 	// Unfortunate special case for '/' where nothing was added we need
 	// to truncate with '\n' for parser.
 	if (curr->size == orig_offset)
 		curr->flags |= EVENT_ROOT_CWD;
-	if (flags & UNRESOLVED_MOUNT_POINTS)
-		curr->flags |= EVENT_ERROR_MOUNT_POINTS;
 	if (flags & UNRESOLVED_PATH_COMPONENTS)
 		curr->flags |= EVENT_ERROR_PATH_COMPONENTS;
 
